@@ -114,13 +114,13 @@ static char fragShader[4096];
 static int luaLastValue;
 static const char *luaErrorString = "";
 
-bool LuaInputLine(const char *name, char *buf, int bufSize, int *value)
+bool LuaInputLine(const char *name, char *buf, int bufSize, int *value, bool executeAlways)
 {
 	if (!buf[0]) {
 		memcpy(buf, "return 0", 8);
 	}
 	char *luaLine = buf + 7;
-	if (ImGui::InputText(name, luaLine, bufSize - 7))
+	if (ImGui::InputText(name, luaLine, bufSize - 7) || executeAlways)
 	{
 		int error = luaL_dostring(s_lua, buf);
 		if (error) {
@@ -128,8 +128,10 @@ bool LuaInputLine(const char *name, char *buf, int bufSize, int *value)
 			lua_pop(s_lua, 1);
 		} else {
 			luaErrorString = "";
-			*value = luaLastValue = lua_tointeger(s_lua, -1);
+			luaLastValue = lua_tointeger(s_lua, -1);
 			lua_pop(s_lua, 1);
+			if (*value == luaLastValue) return false;
+			*value = luaLastValue;
 			return true;
 		}
 	}
@@ -150,7 +152,7 @@ static bool buffersDirty;
 static bool shadersDirty;
 static bool shadersInitted;
 static bool wireframe;
-static int upAxis = 1;
+static int upAxis = 2;
 static int vertexCount = 0;
 static int indexCount = 0;
 static char vertShaderErrorLog[1024];
@@ -201,11 +203,11 @@ void main()
 		ImGui::Text("File: %s (0x%08x %d bytes)", current_file_name == nullptr ? "(none)" : current_file_name, current_file_size, current_file_size);
 		ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 		ImGui::Combo("Up axis", &upAxis, "x-up\0y-up\0z-up\0\0");
-		buffersDirty = LuaInputLine("Vertex buffer offset", vertBufOfsLua, 256, &vertBufOfs);
-		buffersDirty |= LuaInputLine("Vertex buffer size (bytes)", vertBufSzLua, 256, &vertBufSz);
+		buffersDirty = LuaInputLine("Vertex buffer offset", vertBufOfsLua, 256, &vertBufOfs, false);
+		buffersDirty |= LuaInputLine("Vertex buffer size (bytes)", vertBufSzLua, 256, &vertBufSz, false);
 		buffersDirty |= ImGui::InputInt("Vertex buffer stride (bytes)", &vertBufStride, 4, 12);
-		buffersDirty |= LuaInputLine("Index buffer offset", indexBufOfsLua, 256, &indexBufOfs);
-		buffersDirty |= LuaInputLine("Index buffer size (bytes)", indexBufSzLua, 256, &indexBufSz);
+		buffersDirty |= LuaInputLine("Index buffer offset", indexBufOfsLua, 256, &indexBufOfs, false);
+		buffersDirty |= LuaInputLine("Index buffer size (bytes)", indexBufSzLua, 256, &indexBufSz, true);
 		buffersDirty |= ImGui::Combo("Index buffer element type", &indexBufFmt, "ubyte\0ushort\0uint\0\0");
 		ImGui::Combo("draw mode", &drawMode, "Points\0Lines\0Triangles\0Line Strip\0Line Loop\0Triangle Strip\0Triangle Fan\0\0");
 		ImGui::Checkbox("wireframe", &wireframe);
@@ -289,16 +291,8 @@ void main()
 		if (buffersDirty)
 		{
 			glBindVertexArray(vao);
-			int actualVertBufOfs = vertBufOfs;
-			int actualVertBufSz = vertBufSz;
-			if (actualVertBufOfs > current_file_size)
-			{
-				actualVertBufOfs = current_file_size;
-			}
-			if (actualVertBufOfs + actualVertBufSz > current_file_size)
-			{
-				actualVertBufSz = current_file_size - actualVertBufOfs;
-			}
+			int actualVertBufOfs = glm::clamp(vertBufOfs, 0, current_file_size);
+			int actualVertBufSz = glm::clamp(vertBufSz, 0, current_file_size - actualVertBufOfs);
 			if (currentVertBuf)
 			{
 				glDeleteBuffers(1, &currentVertBuf);
@@ -328,7 +322,7 @@ void main()
 				targetPosition.y = (max[1] + min[1]) * 0.5f;
 				targetPosition.z = (max[2] + min[2]) * 0.5f;
 				glm::vec3 dist{max[0] - min[0], max[1] - min[1], max[2] - min[2]};
-				float targetDistance = glm::length(dist);
+				float targetDistance = glm::length(dist) * 0.5f;
 				if (targetDistance < 0.5f) targetDistance = 0.5f;
 				cameraPosition = targetPosition + (glm::vec3{0.707, 0.707, 0.707} * targetDistance);
 				cameraOrient = glm::rotation(glm::vec3{1, 0, 0}, normalize(cameraPosition - targetPosition));
@@ -338,16 +332,8 @@ void main()
 				vertexCount = 0;
 			}
 			
-			int actualIndexBufOfs = indexBufOfs;
-			int actualIndexBufSz = indexBufSz;
-			if (actualIndexBufOfs > current_file_size)
-			{
-				actualIndexBufOfs = current_file_size;
-			}
-			if (actualIndexBufOfs + actualIndexBufSz > current_file_size)
-			{
-				actualIndexBufSz = current_file_size - actualVertBufOfs;
-			}
+			int actualIndexBufOfs = glm::clamp(indexBufOfs, 0, current_file_size);
+			int actualIndexBufSz = glm::clamp(indexBufSz, 0, current_file_size - actualIndexBufOfs);
 			if (currentIndexBuf)
 			{
 				glDeleteBuffers(1, &currentIndexBuf);
@@ -401,8 +387,8 @@ void main()
 			float s = 0.1f;
 			if (io.KeyCtrl) s *= 10.0f;
 			if (io.KeyShift) s *= 10.0f;
-			if (io.KeysDown[GLFW_KEY_Q]) motion += s * up;
-			if (io.KeysDown[GLFW_KEY_E]) motion -= s * up;
+			if (io.KeysDown[GLFW_KEY_E]) motion += s * up;
+			if (io.KeysDown[GLFW_KEY_Q]) motion -= s * up;
 			if (io.KeysDown[GLFW_KEY_A]) motion += s * left;
 			if (io.KeysDown[GLFW_KEY_D]) motion -= s * left;
 			if (io.KeysDown[GLFW_KEY_W]) motion += s * forward;
@@ -414,6 +400,9 @@ void main()
 			glUseProgram(currentProgram);
 			glEnable(GL_DEPTH);
 			glEnable(GL_COLOR);
+			glEnable(GL_BLEND);
+			glBlendEquation(GL_FUNC_ADD);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glm::mat4 projection = glm::perspective(glm::radians(60.0f), (float)display_w / (float)display_h, 0.1f, 1000.0f);
 			glm::vec3 targetPosition = cameraPosition + forward;
 			glm::mat4 view = glm::lookAt(cameraPosition, targetPosition, up);
